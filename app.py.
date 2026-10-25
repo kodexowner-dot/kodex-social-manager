@@ -1,45 +1,97 @@
-import os
-import hmac
+
 import hashlib
+import hmac
 import logging
-from flask import Flask, request, jsonify
+import os
+
+from flask import Flask, jsonify, redirect, request
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 
-VERIFY_TOKEN = os.environ.get('META_VERIFY_TOKEN', '')
-APP_SECRET = os.environ.get('META_APP_SECRET', '')
-TELEGRAM_URL = 'https://t.me/KodexAIMGroupBot'
+SERVICE_NAME = "KODEX MEDIA GROUP AI Manager"
+TELEGRAM_URL = os.getenv(
+    "TELEGRAM_URL",
+    "https://t.me/KodexAIMGroupBot",
+).strip()
 
-@app.get('/')
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "").strip()
+META_APP_SECRET = os.getenv("META_APP_SECRET", "").strip()
+
+
+@app.get("/")
 def home():
     return jsonify({
-        'service': 'KODEX Social AI',
-        'status': 'running',
-        'telegram': TELEGRAM_URL
-    })
+        "service": SERVICE_NAME,
+        "status": "running",
+        "message": "Service is online. Meta webhook integration is the next setup step.",
+        "telegram": TELEGRAM_URL,
+    }), 200
 
-@app.get('/webhook')
-def verify_webhook():
-    mode = request.args.get('hub.mode', '')
-    token = request.args.get('hub.verify_token', '')
-    challenge = request.args.get('hub.challenge', '')
-    if mode == 'subscribe' and VERIFY_TOKEN and hmac.compare_digest(token, VERIFY_TOKEN):
-        return challenge, 200
-    return 'Webhook verification failed', 403
 
-@app.post('/webhook')
-def receive_webhook():
-    raw_body = request.get_data()
-    signature = request.headers.get('X-Hub-Signature-256', '')
-    if APP_SECRET:
-        expected = 'sha256=' + hmac.new(APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            return jsonify({'error': 'Invalid signature'}), 401
-    payload = request.get_json(silent=True) or {}
-    logging.info('Meta webhook event received: object=%s', payload.get('object', 'unknown'))
-    return jsonify({'status': 'received'}), 200
-
-@app.get('/health')
+@app.get("/health")
 def health():
-    return jsonify({'status': 'ok'}), 200
+    return jsonify({"status": "ok"}), 200
+
+
+@app.get("/telegram")
+def telegram_redirect():
+    return redirect(TELEGRAM_URL, code=302)
+
+
+@app.get("/webhook")
+def verify_meta_webhook():
+    mode = request.args.get("hub.mode", "")
+    token = request.args.get("hub.verify_token", "")
+    challenge = request.args.get("hub.challenge", "")
+
+    if (
+        mode == "subscribe"
+        and META_VERIFY_TOKEN
+        and hmac.compare_digest(token, META_VERIFY_TOKEN)
+        and challenge
+    ):
+        return challenge, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+    return jsonify({
+        "error": "Webhook verification failed",
+        "hint": "Check META_VERIFY_TOKEN and the Meta webhook settings.",
+    }), 403
+
+
+@app.post("/webhook")
+def receive_meta_webhook():
+    raw_body = request.get_data(cache=True)
+    signature = request.headers.get("X-Hub-Signature-256", "")
+
+    if not META_APP_SECRET:
+        app.logger.error("META_APP_SECRET is not configured; refusing webhook event.")
+        return jsonify({"error": "Webhook is not configured"}), 503
+
+    expected_signature = "sha256=" + hmac.new(
+        META_APP_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not signature or not hmac.compare_digest(signature, expected_signature):
+        return jsonify({"error": "Invalid signature"}), 401
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+
+    entries = payload.get("entry", [])
+    app.logger.info(
+        "Meta webhook received: object=%s entry_count=%s",
+        payload.get("object", "unknown"),
+        len(entries) if isinstance(entries, list) else 0,
+    )
+    return jsonify({"status": "received"}), 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
